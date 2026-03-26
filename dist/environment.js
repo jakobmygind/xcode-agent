@@ -1,0 +1,126 @@
+import { Octokit } from "@octokit/rest";
+import { execSync } from "child_process";
+import * as fs from "fs/promises";
+import * as path from "path";
+import * as os from "os";
+export class AgentEnvironment {
+    octokit;
+    workspaceBase;
+    secretsBase;
+    constructor(token) {
+        this.octokit = new Octokit({ auth: token });
+        this.workspaceBase = process.env.WORKSPACE_BASE || "/tmp/agent-work";
+        this.secretsBase = process.env.SECRETS_BASE || path.join(os.homedir(), ".agent-secrets");
+    }
+    /**
+     * Fetch ticket details from GitHub issue
+     */
+    async fetchTicket(owner, repo, issueNumber) {
+        const { data: issue } = await this.octokit.rest.issues.get({
+            owner,
+            repo,
+            issue_number: issueNumber,
+        });
+        // Determine agent type from labels
+        const agentLabel = issue.labels.find((l) => {
+            const labelName = typeof l === "string" ? l : l.name;
+            return labelName === "agent:opus" || labelName === "agent:sonnet";
+        });
+        const agentType = (typeof agentLabel === "string"
+            ? agentLabel
+            : agentLabel?.name)?.replace("agent:", "") || "sonnet";
+        const { data: repository } = await this.octokit.rest.repos.get({
+            owner,
+            repo,
+        });
+        return {
+            id: `${owner}-${repo}-${issueNumber}`,
+            number: issueNumber,
+            title: issue.title,
+            body: issue.body || "",
+            agentType,
+            repo: {
+                owner,
+                name: repo,
+                cloneUrl: repository.clone_url,
+            },
+        };
+    }
+    /**
+     * Setup workspace for agent execution
+     */
+    async setupWorkspace(ticket) {
+        const workspacePath = path.join(this.workspaceBase, ticket.id);
+        const secretsPath = path.join(this.secretsBase, `${ticket.repo.owner}-${ticket.repo.name}`);
+        const inputFilePath = path.join(workspacePath, "input");
+        const repoPath = path.join(workspacePath, "repo");
+        // Create workspace directory
+        await fs.mkdir(workspacePath, { recursive: true });
+        await fs.mkdir(repoPath, { recursive: true });
+        // Create input file for bidirectional communication
+        await fs.writeFile(inputFilePath, "", { flag: "w" });
+        // Clone repository
+        console.log(`[Setup] Cloning ${ticket.repo.cloneUrl}...`);
+        execSync(`git clone ${ticket.repo.cloneUrl} "${repoPath}"`, {
+            stdio: "inherit",
+        });
+        // Copy .env from secrets if exists
+        const envSource = path.join(secretsPath, "env");
+        const envDest = path.join(repoPath, ".env");
+        try {
+            await fs.copyFile(envSource, envDest);
+            console.log(`[Setup] Copied .env from secrets`);
+        }
+        catch {
+            console.log(`[Setup] No .env found in secrets, skipping`);
+        }
+        // Resolve package dependencies
+        console.log(`[Setup] Resolving package dependencies...`);
+        try {
+            execSync("xcodebuild -resolvePackageDependencies", {
+                cwd: repoPath,
+                stdio: "inherit",
+            });
+        }
+        catch (error) {
+            console.warn(`[Setup] Package resolution had issues, continuing...`);
+        }
+        return {
+            ticket,
+            workspacePath,
+            secretsPath,
+            inputFilePath,
+            repoPath,
+        };
+    }
+    /**
+     * Verify project builds
+     */
+    async verifyBuild(repoPath) {
+        console.log(`[Setup] Verifying project builds...`);
+        try {
+            const output = execSync("xcodebuild -scheme $(basename $(pwd)) build", {
+                cwd: repoPath,
+                encoding: "utf-8",
+                timeout: 300000, // 5 minutes
+            });
+            return { success: true, output };
+        }
+        catch (error) {
+            return { success: false, output: error.stdout || error.message };
+        }
+    }
+    /**
+     * Clean up workspace
+     */
+    async cleanup(workspacePath) {
+        console.log(`[Cleanup] Removing workspace: ${workspacePath}`);
+        try {
+            await fs.rm(workspacePath, { recursive: true, force: true });
+        }
+        catch (error) {
+            console.error(`[Cleanup] Failed to remove workspace:`, error);
+        }
+    }
+}
+//# sourceMappingURL=environment.js.map
