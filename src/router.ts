@@ -181,6 +181,19 @@ app.post(
       requestId: (req as any).requestId,
     });
 
+    const ticketId = `${owner}-${repo}-${parseInt(issue, 10)}`;
+
+    bridge.broadcast({
+      type: "output",
+      content: `Trigger accepted for ${ticketId}`,
+      timestamp: Date.now(),
+      metadata: {
+        ticketId,
+        ticketNumber: parseInt(issue, 10),
+        stage: "trigger_accepted",
+      },
+    });
+
     // Start agent asynchronously
     startAgent(owner, repo, parseInt(issue, 10), agentType as "opus" | "sonnet")
       .catch(error => {

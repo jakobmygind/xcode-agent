@@ -5,13 +5,16 @@
   "type": "module",
   "scripts": {
     "start": "tsx src/router.ts",
+    "router": "tsx src/router.ts",
     "worker": "tsx src/worker.ts",
     "bridge": "tsx src/bridge.ts",
     "dev": "tsx watch src/router.ts",
     "build": "tsc",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:manual": "tsx scripts/test-manual.ts"
+    "test:manual": "tsx scripts/test-manual.ts",
+    "trigger:ui": "tsx scripts/trigger-ui.ts",
+    "smoke:connection": "tsx scripts/smoke-connection.ts"
   },
   "dependencies": {
     "@octokit/rest": "^21.0.2",
