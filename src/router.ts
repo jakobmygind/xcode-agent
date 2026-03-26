@@ -11,7 +11,7 @@ import { createHealthRouter, createLegacyHealthHandler } from "./routes/health.j
 import { createRateLimitMiddleware, createAuthRateLimitMiddleware } from "./middleware/rate-limit.js";
 import { createSecurityHeadersMiddleware, createDevSecurityHeadersMiddleware } from "./middleware/security-headers.js";
 import { createRequestLoggerMiddleware, ConsoleLogger } from "./middleware/logging.js";
-import { createErrorHandlerMiddleware, createNotFoundHandler, asyncHandler } from "./middleware/error-handler.js";
+import { createErrorHandlerMiddleware, createNotFoundHandler, asyncHandler, HTTPError, Errors } from "./middleware/error-handler.js";
 
 // Load environment variables
 dotenv.config();
@@ -78,6 +78,7 @@ app.use(optionalAuth);
 
 /**
  * Verify GitHub webhook signature
+ * Throws HTTPError with 401 status if signature is invalid
  */
 function verifyWebhookSignature(req: Request, res: Response, buf: Buffer): void {
   const signature = req.headers["x-hub-signature-256"] as string;
@@ -86,8 +87,17 @@ function verifyWebhookSignature(req: Request, res: Response, buf: Buffer): void 
   const hmac = crypto.createHmac("sha256", WEBHOOK_SECRET);
   const digest = "sha256=" + hmac.update(buf).digest("hex");
 
-  if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(digest))) {
-    throw new Error("Invalid webhook signature");
+  try {
+    if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(digest))) {
+      throw Errors.unauthorized("Invalid webhook signature");
+    }
+  } catch (error) {
+    // Handle case where signature and digest have different lengths
+    // or other crypto.timingSafeEqual errors
+    if (error instanceof HTTPError) {
+      throw error;
+    }
+    throw Errors.unauthorized("Invalid webhook signature format");
   }
 }
 
@@ -235,14 +245,18 @@ async function startAgent(
 
     // Forward messages to bridge
     worker.on("message", (message: AgentMessage) => {
-      bridge.broadcast({
-        ...message,
-        metadata: {
-          ...message.metadata,
-          ticketId,
-          ticketNumber: ticket.number,
-        },
-      });
+      try {
+        bridge.broadcast({
+          ...message,
+          metadata: {
+            ...message.metadata,
+            ticketId,
+            ticketNumber: ticket.number,
+          },
+        });
+      } catch (error) {
+        logger.error(`Failed to broadcast message for ${ticketId}`, error);
+      }
     });
 
     // Handle completion
@@ -269,14 +283,24 @@ async function startAgent(
  * Handle commands from bridge
  */
 bridge.on("command", (cmd: { command: string; target?: string }) => {
-  if (cmd.target && activeWorkers.has(cmd.target)) {
-    const worker = activeWorkers.get(cmd.target)!;
-    worker.sendToAgent(cmd.command);
-  } else {
-    // Broadcast to all if no target
-    for (const [id, worker] of activeWorkers) {
+  try {
+    if (cmd.target && activeWorkers.has(cmd.target)) {
+      const worker = activeWorkers.get(cmd.target)!;
       worker.sendToAgent(cmd.command);
+    } else if (!cmd.target) {
+      // Broadcast to all if no target
+      for (const [id, worker] of activeWorkers) {
+        try {
+          worker.sendToAgent(cmd.command);
+        } catch (error) {
+          logger.error(`Failed to send command to worker ${id}`, error);
+        }
+      }
+    } else {
+      logger.warn(`Command target not found: ${cmd.target}`);
     }
+  } catch (error) {
+    logger.error("Error handling bridge command", error);
   }
 });
 

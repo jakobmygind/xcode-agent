@@ -136,6 +136,8 @@ export function createAuthMiddleware(config: AuthConfig) {
       return;
     }
 
+    // Use timing-safe comparison to prevent timing attacks
+    // timingSafeEqual throws if buffers have different lengths, which we catch as invalid
     try {
       const isValid = crypto.timingSafeEqual(
         Buffer.from(token),
@@ -149,8 +151,8 @@ export function createAuthMiddleware(config: AuthConfig) {
         });
         return;
       }
-    } catch (error) {
-      // Buffer length mismatch or other error
+    } catch {
+      // Buffer length mismatch - token is invalid
       res.status(401).json({
         error: "Unauthorized",
         message: "Invalid bearer token.",
@@ -179,6 +181,8 @@ export function createOptionalAuthMiddleware(config: AuthConfig) {
     if (isLoopback && config.allowLocalUnauthenticated) {
       authType = "loopback";
     } else if (token && config.bearerToken) {
+      // Use timing-safe comparison to prevent timing attacks
+      // timingSafeEqual throws if buffers have different lengths, which we treat as invalid
       try {
         const isValid = crypto.timingSafeEqual(
           Buffer.from(token),
@@ -186,6 +190,7 @@ export function createOptionalAuthMiddleware(config: AuthConfig) {
         );
         authType = isValid ? "bearer" : "invalid";
       } catch {
+        // Buffer length mismatch - token is invalid
         authType = "invalid";
       }
     } else {

@@ -56,9 +56,15 @@ export function createCORSMiddleware(config: Partial<CORSConfig> = {}) {
     if (fullConfig.allowedOrigins.includes("*")) {
       allowOrigin = true;
       // When allowing all origins with credentials, we must echo the actual origin
-      if (fullConfig.allowCredentials && origin) {
-        res.header("Access-Control-Allow-Origin", origin);
-        res.header("Access-Control-Allow-Credentials", "true");
+      // If no origin header is present but credentials are enabled, we cannot use wildcard
+      // In that case, we skip setting the header (browser will block the request anyway)
+      if (fullConfig.allowCredentials) {
+        if (origin) {
+          res.header("Access-Control-Allow-Origin", origin);
+          res.header("Access-Control-Allow-Credentials", "true");
+        }
+        // If no origin header and credentials enabled, we don't set any CORS headers
+        // The request will likely fail browser CORS checks, which is correct behavior
       } else {
         res.header("Access-Control-Allow-Origin", "*");
       }
