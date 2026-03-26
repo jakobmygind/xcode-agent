@@ -1,234 +1,157 @@
 # Xcode Agent Runner
 
-A ticket-driven AI agent system for iOS development with real-time streaming.
+Ticket-driven AI agent backend for the macOS Xcode Agent UI.
 
-## Architecture
+## What it does
 
-```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│   GitHub    │────▶│   Router    │────▶│   Worker    │
-│   Webhook   │     │   (HTTP)    │     │   (PTY)     │
-└─────────────┘     └─────────────┘     └──────┬──────┘
-                                                │
-                       ┌────────────────────────┘
-                       ▼
-              ┌─────────────────┐
-              │  Claude CLI     │
-              │  (Agent)        │
-              └────────┬────────┘
-                       │
-                       ▼
-              ┌─────────────────┐
-              │  XcodeBuilder   │
-              │  (xcodebuild)   │
-              └────────┬────────┘
-                       │
-                       ▼
-              ┌─────────────────┐
-              │    Bridge       │
-              │  (WebSocket)    │
-              └────────┬────────┘
-                       │
-         ┌─────────────┼─────────────┐
-         ▼             ▼             ▼
-    ┌─────────┐   ┌─────────┐   ┌─────────┐
-    │ Telegram│   │ Web UI  │   │ Console │
-    └─────────┘   └─────────┘   └─────────┘
-```
+- exposes an HTTP router on `http://127.0.0.1:3800`
+- exposes a WebSocket bridge on `ws://127.0.0.1:9300`
+- clones the target repo for a ticket
+- spawns Claude CLI against that clone
+- streams agent output into the UI using the envelope protocol the app expects
 
-## Components
+This repo is the backend half of the local setup. The frontend half lives in `XcodeAgentUI`.
 
-### 1. Router (`src/router.ts`)
-- HTTP server for GitHub webhooks
-- Manual trigger endpoint
-- Health checks and agent status
-- Accepts issues labeled `agent:opus` or `agent:sonnet`
+## Fresh-clone happy path
 
-### 2. Worker (`src/worker.ts`)
-- Spawns Claude CLI in PTY
-- Manages bidirectional communication
-- Watches input file for user commands
-- Streams output to bridge
-
-### 3. Xcode (`src/xcode.ts`)
-- `xcodebuild` wrapper with streaming
-- Error parsing (file, line, message)
-- Build and test execution
-- Real-time output formatting
-
-### 4. Bridge (`src/bridge.ts`)
-- WebSocket server for streaming
-- Message buffering for new clients
-- Formatted console output
-- Command routing
-
-### 5. Environment (`src/environment.ts`)
-- GitHub API integration
-- Workspace setup and cleanup
-- Repository cloning
-- `.env` secrets injection
-
-## Quick Start
+### 1. Clone and install
 
 ```bash
-# 1. Setup
-cd ~/workspace/xcode-agent
-./setup.sh
+git clone <backend-repo-url> xcode-agent
+cd xcode-agent
+npm install
+cp .env.example .env
+```
 
-# 2. Configure
-vim .env  # Add your GitHub token
+### 2. Configure `.env`
 
-# 3. Start
+Minimum viable local config:
+
+```bash
+PORT=3800
+BRIDGE_WS_PORT=9300
+GITHUB_TOKEN=ghp_...
+ALLOW_LOCAL_UNAUTHENTICATED=true
+```
+
+Notes:
+- `GITHUB_TOKEN` is required for real ticket execution because the backend fetches issue/repo metadata from GitHub.
+- `BEARER_TOKEN` is optional for local-only use. Add it when exposing the service beyond loopback.
+- local UI → backend traffic works without auth when `ALLOW_LOCAL_UNAUTHENTICATED=true`.
+
+### 3. Start the backend
+
+```bash
 npm start
 ```
 
-## Configuration
+Expected startup lines:
 
-### Environment Variables
+```text
+[Bridge] WebSocket server listening on port 9300
+HTTP server listening on port 3800
+Ready for GitHub webhooks at /webhook/github
+Manual trigger at POST /trigger
+Health check at GET /api/health
+```
+
+### 4. Verify connectivity
 
 ```bash
-PORT=3000                    # HTTP server port
-WEBHOOK_SECRET=xxx           # GitHub webhook secret
-GITHUB_TOKEN=ghp_xxx         # GitHub personal access token
-BRIDGE_WS_PORT=8080          # WebSocket port
-WORKSPACE_BASE=/tmp/agent-work
-SECRETS_BASE=~/.agent-secrets
+npm run smoke:connection
 ```
 
-### Repository Secrets
+That confirms:
+- router health responds
+- bridge accepts WebSocket clients
+- `/trigger` emits a bridge event the UI can consume
 
-Place `.env` files in `~/.agent-secrets/<owner-repo>/env`:
+## UI contract
 
-```
-~/.agent-secrets/
-├── myorg-myapp/
-│   └── env          # API keys, certs, etc.
-└── other-repo/
-    └── env
-```
+The bridge emits typed envelopes, not raw worker frames.
 
-## API Endpoints
+Envelope shape:
 
-### GitHub Webhook
-```
-POST /webhook/github
-X-GitHub-Event: issues
-```
-
-Trigger: Label issue with `agent:opus` or `agent:sonnet`
-
-### Manual Trigger
-```bash
-POST /trigger
-Content-Type: application/json
-
-{
-  "owner": "myorg",
-  "repo": "myapp",
-  "issue": 123,
-  "agentType": "sonnet"  // or "opus"
-}
-```
-
-### Health Check
-```bash
-GET /health
-```
-
-### List Agents
-```bash
-GET /agents
-```
-
-## WebSocket Protocol
-
-Connect to `ws://localhost:8080`
-
-### Message Format
 ```json
 {
-  "type": "output|error|thought|code|build|complete|input",
-  "content": "message text",
-  "timestamp": 1711234567890,
-  "metadata": { "ticketId": "..." }
+  "type": "agent_output",
+  "from": "agent",
+  "ts": "2026-03-26T15:00:00.000Z",
+  "payload": "message text"
 }
 ```
 
-### Send Commands
+Important emitted event types:
+- `agent_output`
+- `agent_error`
+- `agent_status`
+- `file_changed`
+- `agent_approval_request`
+- `build_result`
+- `system`
+
+Client commands sent back over WebSocket are still plain JSON:
+
 ```json
 {
   "command": "check the tests",
-  "target": "optional-ticket-id"
+  "target": "owner-repo-123",
+  "timestamp": 1711234567890
 }
 ```
 
-## Bidirectional Chat
+## Local UI-driven run flow
 
-Agent reads from: `/tmp/agent-work/<ticket-id>/input`
+When the macOS app starts a Mission Control session it should:
+1. connect to the bridge as a human client
+2. POST `/trigger` via `npm run trigger:ui`
+3. pass the ticket id as `ISSUE` / `TICKET_ID`
+4. send steering commands over WebSocket with `target = <ticket-id>`
 
-Write commands to this file to communicate with the agent:
+The backend expects ticket ids in this form:
+
+```text
+<owner>-<repo>-<issueNumber>
+```
+
+For the current UI-trigger helper, owner defaults to `local` and repo defaults to the project name unless overridden with env vars.
+
+## Scripts
 
 ```bash
-echo "check the tests" > /tmp/agent-work/owner-repo-123/input
+npm start              # router + bridge in one process
+npm run router         # same as start
+npm run bridge         # bridge-only entrypoint (used by the UI today)
+npm run trigger:ui     # POST /trigger using env vars from the app
+npm run smoke:connection
+npm test
 ```
 
-## Agent Behavior
+## Environment variables
 
-When started, the agent will:
+| Variable | Default | Purpose |
+|---|---:|---|
+| `PORT` | `3800` | HTTP router port |
+| `BRIDGE_WS_PORT` | `9300` | WebSocket bridge port |
+| `GITHUB_TOKEN` | – | GitHub API auth for fetching ticket + repo metadata |
+| `WEBHOOK_SECRET` | empty | GitHub webhook signature validation |
+| `BEARER_TOKEN` | empty | optional auth token for non-loopback clients |
+| `ALLOW_LOCAL_UNAUTHENTICATED` | `true` | allow localhost without bearer token |
+| `WORKSPACE_BASE` | `/tmp/agent-work` | clone/build workspace root |
+| `SECRETS_BASE` | `~/.agent-secrets` | optional per-repo env injection |
 
-1. **Explore** - Read ticket, understand codebase
-2. **Plan** - Form implementation approach
-3. **Implement** - Write code changes
-4. **Build** - Run `xcodebuild` and fix errors
-5. **Test** - Run tests if available
-6. **Commit** - `git commit` with clear message
-7. **Push** - Create branch `agent/<ticket-id>-<description>`
-8. **Report** - Summarize changes
-
-## Output Format
-
-```
-[Xcode] Build started: MyApp
-[Xcode] ❌ Error: ViewController.swift:42:15: Cannot convert value
-[Xcode] ✅ Build succeeded
-[Agent] 💭 The error is in the binding code...
-[Agent] 📝 Modified: ViewController.swift
-[Xcode] Build started: MyApp
-[Xcode] ✅ Build succeeded
-[Agent] ✅ Committed changes to agent/123-fix-binding
-```
-
-## Development
+## Testing
 
 ```bash
-# Install deps
-npm install
-
-# Run in dev mode
-npm run dev
-
-# Type check
-npx tsc --noEmit
+npm test
+npm run smoke:connection
 ```
 
-## Troubleshooting
+## Known limitations
 
-### Build fails with "scheme not found"
-The agent tries to infer the scheme. If it fails, the agent will ask for clarification or try common scheme names.
-
-### Claude CLI not found
-Install: `npm install -g @anthropic-ai/claude-cli`
-
-### Webhook not triggering
-- Verify `WEBHOOK_SECRET` matches GitHub webhook settings
-- Check GitHub webhook delivery logs
-- Test with manual trigger first
-
-### Workspace permissions
-Ensure the workspace base directory is writable:
-```bash
-chmod 755 /tmp/agent-work
-```
+- real ticket execution still depends on valid `GITHUB_TOKEN`, reachable repo URLs, and a working local `claude` CLI
+- `/trigger` currently starts a real worker; the smoke test only verifies the initial bridge event, not a full agent run
+- the worker still uses GitHub-backed ticket lookup rather than a fully local mock ticket path
 
 ## License
 

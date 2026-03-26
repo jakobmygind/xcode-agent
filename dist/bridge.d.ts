@@ -27,6 +27,11 @@ export declare class AgentBridge extends EventEmitter {
      * Send command to agent (via input file or direct)
      */
     sendCommand(command: string, target?: string): void;
+    private convertMessage;
+    private resolveSender;
+    private bufferEnvelope;
+    private broadcastSystemEvent;
+    private sendSystemEvent;
     /**
      * Format and log message to console
      */
