@@ -1,17 +1,37 @@
 import { Router, Request, Response } from "express";
+import { readFileSync } from "fs";
+import { fileURLToPath } from "url";
+import { dirname, join } from "path";
 import { PROTOCOL_VERSION } from "../middleware/auth.js";
+
+// Cache for package.json to avoid repeated reads
+let cachedVersion: string | null = null;
 
 /**
  * Get package version from package.json
+ * Tries multiple resolution strategies for development and production
  */
-function getVersion(): string {
+export function getVersion(): string {
+  if (cachedVersion) return cachedVersion;
+
   try {
-    // In development (tsx), import.meta.url points to the source file
-    // In production, we need to resolve from the compiled output
-    const pkg = (global as any).__packageJson || { version: "1.0.0" };
-    return pkg.version || "1.0.0";
+    // Strategy 1: Try to read from current working directory
+    const pkg = JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf-8"));
+    cachedVersion = pkg.version;
+    return cachedVersion || "1.0.0";
   } catch {
-    return "1.0.0";
+    // Strategy 2: Try to resolve relative to this module
+    try {
+      const __filename = fileURLToPath(import.meta.url);
+      const __dirname = dirname(__filename);
+      const pkg = JSON.parse(readFileSync(join(__dirname, "../../package.json"), "utf-8"));
+      cachedVersion = pkg.version;
+      return cachedVersion || "1.0.0";
+    } catch {
+      // Fallback to environment variable or default
+      cachedVersion = process.env.npm_package_version || "1.0.0";
+      return cachedVersion;
+    }
   }
 }
 
