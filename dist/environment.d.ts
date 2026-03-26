@@ -22,7 +22,11 @@ export declare class AgentEnvironment {
     private octokit;
     private workspaceBase;
     private secretsBase;
+    private gitTransport;
     constructor(token: string);
+    private resolveGitTransport;
+    private getCloneUrl;
+    private verifyGitPushAccess;
     /**
      * Fetch ticket details from GitHub issue
      */

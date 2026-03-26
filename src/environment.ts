@@ -4,6 +4,8 @@ import * as fs from "fs/promises";
 import * as path from "path";
 import * as os from "os";
 
+type GitTransportMode = "ssh" | "https";
+
 export interface Ticket {
   id: string;
   number: number;
@@ -26,15 +28,58 @@ export interface AgentContext {
   repoPath: string;
 }
 
+function toGithubSshUrl(owner: string, repo: string): string {
+  return `git@github.com:${owner}/${repo}.git`;
+}
+
+function looksLikeGithubRepo(url: string): boolean {
+  return /(^git@github\.com:)|(^https:\/\/github\.com\/)/i.test(url);
+}
+
 export class AgentEnvironment {
   private octokit: Octokit;
   private workspaceBase: string;
   private secretsBase: string;
+  private gitTransport: GitTransportMode;
 
   constructor(token: string) {
     this.octokit = new Octokit({ auth: token });
     this.workspaceBase = process.env.WORKSPACE_BASE || "/tmp/agent-work";
     this.secretsBase = process.env.SECRETS_BASE || path.join(os.homedir(), ".agent-secrets");
+    this.gitTransport = this.resolveGitTransport();
+  }
+
+  private resolveGitTransport(): GitTransportMode {
+    const value = (process.env.GITHUB_GIT_TRANSPORT || "ssh").trim().toLowerCase();
+    return value === "https" ? "https" : "ssh";
+  }
+
+  private getCloneUrl(ticket: Pick<Ticket, "repo">): string {
+    if (this.gitTransport === "ssh" && looksLikeGithubRepo(ticket.repo.cloneUrl)) {
+      return toGithubSshUrl(ticket.repo.owner, ticket.repo.name);
+    }
+    return ticket.repo.cloneUrl;
+  }
+
+  private verifyGitPushAccess(repoPath: string): void {
+    const remoteUrl = execSync("git remote get-url origin", {
+      cwd: repoPath,
+      encoding: "utf-8",
+    }).trim();
+
+    if (!looksLikeGithubRepo(remoteUrl)) {
+      return;
+    }
+
+    if (remoteUrl.startsWith("git@github.com:")) {
+      console.log(`[Setup] Verifying GitHub SSH push access...`);
+      execSync("ssh -T -o BatchMode=yes -o StrictHostKeyChecking=accept-new git@github.com || true", {
+        cwd: repoPath,
+        stdio: "inherit",
+      });
+    } else {
+      console.log(`[Setup] Skipping SSH push access check for non-SSH remote: ${remoteUrl}`);
+    }
   }
 
   /**
@@ -85,18 +130,20 @@ export class AgentEnvironment {
     const inputFilePath = path.join(workspacePath, "input");
     const repoPath = path.join(workspacePath, "repo");
 
-    // Create workspace directory
+    // Reset workspace so repeated runs for the same ticket don't fail on stale clones
+    await fs.rm(workspacePath, { recursive: true, force: true });
     await fs.mkdir(workspacePath, { recursive: true });
-    await fs.mkdir(repoPath, { recursive: true });
 
     // Create input file for bidirectional communication
     await fs.writeFile(inputFilePath, "", { flag: "w" });
 
     // Clone repository
-    console.log(`[Setup] Cloning ${ticket.repo.cloneUrl}...`);
-    execSync(`git clone ${ticket.repo.cloneUrl} "${repoPath}"`, {
+    const cloneUrl = this.getCloneUrl(ticket);
+    console.log(`[Setup] Cloning ${cloneUrl} (transport: ${this.gitTransport})...`);
+    execSync(`git clone ${cloneUrl} "${repoPath}"`, {
       stdio: "inherit",
     });
+    this.verifyGitPushAccess(repoPath);
 
     // Copy .env from secrets if exists
     const envSource = path.join(secretsPath, "env");
