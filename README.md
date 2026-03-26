@@ -119,9 +119,9 @@ For the current UI-trigger helper, owner defaults to `local` and repo defaults t
 ## Scripts
 
 ```bash
-npm start              # router + bridge in one process
+npm start              # main local backend: HTTP API + WebSocket bridge
 npm run router         # same as start
-npm run bridge         # bridge-only entrypoint (used by the UI today)
+npm run bridge         # bridge-only debug entrypoint; not the normal UI/dev path
 npm run trigger:ui     # POST /trigger using env vars from the app
 npm run smoke:connection
 npm test
@@ -149,8 +149,9 @@ npm run smoke:connection
 
 ## Known limitations
 
-- real ticket execution still depends on valid `GITHUB_TOKEN`, reachable repo URLs, and a working local `claude` CLI
-- `/trigger` currently starts a real worker; the smoke test only verifies the initial bridge event, not a full agent run
+- real ticket execution still depends on valid GitHub access, reachable repo URLs, and a working local `claude` CLI
+- `/trigger` now validates GitHub issue access before returning `202 Accepted`
+- the smoke test only verifies router + bridge connectivity and trigger emission, not a full agent coding run
 - the worker still uses GitHub-backed ticket lookup rather than a fully local mock ticket path
 
 ## License
