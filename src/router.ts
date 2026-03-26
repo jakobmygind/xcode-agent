@@ -5,15 +5,31 @@ import { AgentEnvironment } from "./environment.js";
 import { AgentWorker } from "./worker.js";
 import { AgentBridge } from "./bridge.js";
 import { AgentMessage } from "./worker.js";
+import { createAuthMiddleware, createOptionalAuthMiddleware } from "./middleware/auth.js";
+import { createCORSMiddleware } from "./middleware/cors.js";
+import { createHealthRouter, createLegacyHealthHandler } from "./routes/health.js";
 
 // Load environment variables
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3800;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "";
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN || "";
-const BRIDGE_PORT = parseInt(process.env.BRIDGE_WS_PORT || "8080", 10);
+const BRIDGE_PORT = parseInt(process.env.BRIDGE_WS_PORT || "9300", 10);
+const BEARER_TOKEN = process.env.BEARER_TOKEN || "";
+
+// Auth configuration
+const authConfig = {
+  bearerToken: BEARER_TOKEN || undefined,
+  allowLocalUnauthenticated: process.env.ALLOW_LOCAL_UNAUTHENTICATED !== "false", // default true
+};
+
+// CORS configuration
+const corsConfig = {
+  allowedOrigins: process.env.ALLOWED_ORIGINS?.split(",") || ["*"],
+  allowCredentials: true,
+};
 
 // Track active workers
 const activeWorkers = new Map<string, AgentWorker>();
@@ -24,8 +40,14 @@ const bridge = new AgentBridge({ port: BRIDGE_PORT });
 // Initialize environment
 const environment = new AgentEnvironment(GITHUB_TOKEN);
 
-// Middleware
+// Global middleware
+app.use(createCORSMiddleware(corsConfig));
 app.use(express.json({ verify: verifyWebhookSignature }));
+
+// Auth middleware (optional for most routes, can be made required per-route)
+const optionalAuth = createOptionalAuthMiddleware(authConfig);
+const requireAuth = createAuthMiddleware(authConfig);
+app.use(optionalAuth);
 
 /**
  * Verify GitHub webhook signature
@@ -118,15 +140,13 @@ app.post("/trigger", async (req: Request, res: Response) => {
 });
 
 /**
- * Health check endpoint
+ * Health check endpoints
  */
-app.get("/health", (req: Request, res: Response) => {
-  res.json({
-    status: "healthy",
-    activeAgents: activeWorkers.size,
-    bridgePort: BRIDGE_PORT,
-  });
-});
+// New API health endpoint at /api/health
+app.use("/api", createHealthRouter());
+
+// Legacy health endpoint (for backward compatibility)
+app.get("/health", createLegacyHealthHandler());
 
 /**
  * List active agents
@@ -227,4 +247,7 @@ app.listen(PORT, () => {
   console.log(`[Router] WebSocket bridge on port ${BRIDGE_PORT}`);
   console.log(`[Router] Ready for GitHub webhooks at /webhook/github`);
   console.log(`[Router] Manual trigger at POST /trigger`);
+  console.log(`[Router] Health check at GET /api/health`);
+  console.log(`[Router] Auth: ${authConfig.bearerToken ? "Bearer token required for non-loopback" : "No bearer token configured"}`);
+  console.log(`[Router] Local unauthenticated access: ${authConfig.allowLocalUnauthenticated ? "allowed" : "denied"}`);
 });
